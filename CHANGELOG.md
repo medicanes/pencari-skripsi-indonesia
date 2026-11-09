@@ -7,6 +7,20 @@ dan project ini menggunakan [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [Unreleased]
+
+### Diperbaiki
+- **Ekspor Excel (`--format xlsx` / `--format semua`) tidak lagi crash** — `ekspor_xlsx()`
+  memakai indeks kolom yang meleset satu. Hyperlink dipasang ke kolom **Skor** (berisi
+  integer) sehingga muncul `AttributeError: 'int' object has no attribute 'startswith'`
+  di akhir pencarian, padahal CSV/JSON sudah tersimpan. Karena `semua` adalah format
+  default, bug ini berdampak pada hampir semua penggunaan.
+  - Wrap text dipindah ke kolom 8 (**Keterangan Akses**), sebelumnya kena kolom *Status PDF*
+  - Hyperlink dipindah ke kolom 10 (**URL Detail**) dan 11 (**URL PDF**), sebelumnya 9 dan 10
+  - Ditambah guard `isinstance(..., str)` agar kolom non-teks tidak pernah diproses
+
+---
+
 ## [1.3.0] — 2025-03-15
 
 ### Ditambahkan

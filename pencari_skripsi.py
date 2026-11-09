@@ -1265,13 +1265,13 @@ def ekspor_xlsx(hasil: list[Skripsi], path: str):
             for cell in ws[last_row]:
                 cell.fill = LOCKED_FILL
 
-        # Kolom keterangan — wrap text agar terbaca
-        ws.cell(row=last_row, column=7).alignment = Alignment(wrap_text=True)
+        # Kolom keterangan — wrap text agar terbaca (kolom 8 = Keterangan Akses)
+        ws.cell(row=last_row, column=8).alignment = Alignment(wrap_text=True)
 
-        # Link aktif untuk URL (kolom 9=URL Detail, 10=URL PDF)
-        for col_idx in [9, 10]:
+        # Link aktif untuk URL (kolom 10=URL Detail, 11=URL PDF)
+        for col_idx in [10, 11]:
             cell = ws.cell(row=last_row, column=col_idx)
-            if cell.value and cell.value.startswith("http"):
+            if isinstance(cell.value, str) and cell.value.startswith("http"):
                 cell.hyperlink = cell.value
                 cell.font = Font(color="0563C1", underline="single")
 
