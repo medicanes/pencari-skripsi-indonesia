@@ -159,6 +159,7 @@ Untuk repository yang memecah skripsi menjadi banyak file terpisah, script juga 
 | `--workers` | | Jumlah thread paralel | `3` |
 | `--delay` | | Jeda antar request dalam detik | `1.2` |
 | `--no-cache` | | Nonaktifkan cache lokal | `false` |
+| `--cek-konfigurasi` | | Periksa kewajaran URL `repositories.json` (tanpa internet) | — |
 | `--list-universitas` | | Tampilkan daftar universitas | — |
 | `--interactive` | `-i` | Mode tanya-jawab interaktif | — |
 | `--quiet` | `-q` | Kurangi output ke terminal | `false` |
@@ -304,6 +305,30 @@ Script tetap berfungsi normal — hanya deteksi multi-file yang aktif, analisis 
 Script ini menggunakan **OAI-PMH** (Open Archives Initiative Protocol for Metadata Harvesting) sebagai metode fetch utama. Ini adalah protokol standar internasional yang diimplementasikan oleh hampir semua platform repository ilmiah — termasuk EPrints dan DSpace yang dipakai oleh 80%+ perguruan tinggi di Indonesia.
 
 Bedanya dengan scraping HTML biasa: OAI-PMH memberikan data terstruktur langsung (judul, penulis, abstrak, URL, tahun) tanpa perlu menafsirkan HTML. Hasilnya lebih konsisten dan jauh lebih jarang rusak saat tampilan website berubah.
+
+---
+
+## ⚠️ Batasan Penting — Baca Sebelum Mengandalkan Hasil
+
+**Script ini bukan mesin pencari.** OAI-PMH (`ListRecords`) tidak mendukung pencarian
+kata kunci, jadi script mengambil sejumlah rekaman **terbaru** dari katalog kampus lalu
+menyaringnya sendiri di komputer Anda. Konsekuensinya:
+
+- Kampus dengan puluhan ribu dokumen bisa menghasilkan **0 hasil** meskipun skripsi
+  yang Anda cari benar-benar ada di sana — karena dokumen itu tidak termasuk rekaman
+  terbaru yang terambil.
+- Kata kunci yang **umum** (`gambut`, `hukum`, `sistem`) lebih sering berhasil
+  daripada kata kunci spesifik (`SWCC tanah organik tropis`).
+- Untuk **penelusuran berbasis topik**, gunakan agregator yang memang dirancang
+  untuk itu: **[RAMA](https://rama.kemdikbud.go.id)** (repositori nasional skripsi/
+  tesis/disertasi) dan **[Garuda](https://garuda.kemdikbud.go.id)** (jurnal nasional).
+
+Gunakan script ini untuk hal yang memang menjadi kekuatannya: **memverifikasi apakah
+PDF sebuah skripsi dapat diunduh lengkap**, setelah Anda mengetahui judulnya dari
+sumber lain.
+
+Sejak v1.3.1, jika sebuah kampus menghasilkan 0, script menampilkan blok **Diagnostik**
+berisi alasan spesifiknya — bukan sekadar "tidak ada hasil".
 
 ---
 

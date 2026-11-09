@@ -21,6 +21,37 @@ dan project ini menggunakan [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [1.3.1] — 2026-11-09
+
+### Diperbaiki
+- **Kegagalan tidak lagi ditelan diam-diam** — sebelumnya `except Exception: return []`
+  di `cari_banyak()` membuat setiap error berubah menjadi "0 hasil" tanpa penjelasan.
+  Pengguna tidak bisa membedakan antara situs kampus mati, konfigurasi salah, parser
+  tidak cocok, atau kata kunci yang memang tidak ada.
+  - Ditambahkan `self.diagnosa: dict[str, str]` pada `PencariSkripsi`
+  - `cari_satu_universitas()` kini mencatat alasan spesifik per kampus
+  - Fungsi baru `cetak_diagnostik()` menampilkan kampus tanpa hasil + sebabnya + saran
+- **Membedakan "OAI mati" dari "kata kunci tidak ada"** — fungsi baru `_cek_oai_hidup()`
+  mengirim verb `Identify` untuk memastikan endpoint benar-benar OAI-PMH. Sebelumnya
+  kedua kondisi ini menghasilkan pesan yang sama menyesatkan.
+- **Kontradiksi platform di `repositories.json`** — label `platform` tidak cocok dengan
+  endpoint yang dipakai:
+  - `itb`: `dspace` → `gdl` (endpoint `cgi-bin/oai.pl` + `gdl.php`, bukan DSpace)
+  - `uinjakarta`: `eprints` → `dspace` (endpoint `/dspace/oai/request`)
+  - `uii`: `eprints` → `dspace` (endpoint `/oai/request`)
+  - Field `parser` **tidak diubah** — nilainya sudah benar, hanya label `platform` yang salah
+- **Peringatan mode `--metode oai`** — ditampilkan di awal karena mode ini mematikan
+  fallback HTML, sehingga kampus tanpa OAI yang berfungsi akan menghasilkan 0 tanpa
+  percobaan kedua.
+
+### Ditambahkan
+- **`--cek-konfigurasi`** — memeriksa kewajaran URL seluruh entri `repositories.json`
+  **tanpa akses internet**. Mendeteksi kontradiksi platform, domain OAI yang berbeda
+  dengan `url_base`, serta field yang kosong. Hanya menandai kejanggalan yang jelas
+  agar tidak menghasilkan alarm palsu.
+
+---
+
 ## [1.3.0] — 2025-03-15
 
 ### Ditambahkan
