@@ -131,7 +131,7 @@ except ImportError:
     XLSX_AVAILABLE = False
 
 # ── Konstanta ────────────────────────────────────────────────────────
-VERSION = "1.3"
+VERSION = "1.3.1"
 SCRIPT_DIR = Path(__file__).parent
 REPO_CONFIG = SCRIPT_DIR / "repositories.json"
 CACHE_DIR = SCRIPT_DIR / ".cache_skripsi"
@@ -151,6 +151,81 @@ HEADERS = {
     "Accept-Language": "id-ID,id;q=0.9,en;q=0.7",
     "Accept": "text/html,application/xhtml+xml,*/*;q=0.8",
 }
+
+# ── Diagnostik endpoint (v1.3.1) ─────────────────────────────────────
+# Sidik jari KHAS per platform pada URL endpoint OAI. Dipakai hanya untuk
+# mendeteksi kontradiksi antar-platform, bukan untuk menilai search_url
+# (URL pencarian sah-sah saja bervariasi antar instalasi).
+# Pola yang khas untuk tiap platform, baik pada endpoint OAI maupun
+# pada halaman pencarian. Dipakai untuk menebak platform sebuah URL.
+SIDIK_JARI_OAI = {
+    "eprints": ("cgi/oai2", "cgi-bin/oai", "cgi-bin/search", "/cgi/search"),
+    "dspace":  ("/oai/request", "/xmlui/", "/jspui/", "/discover"),
+}
+
+
+def _platform_dari_url(url: str) -> Optional[str]:
+    """Tebak platform dari pola URL (None = tidak dikenali)."""
+    u = (url or "").lower()
+    for platform, penanda in SIDIK_JARI_OAI.items():
+        if any(p in u for p in penanda):
+            return platform
+    return None
+
+
+def periksa_konfigurasi(univ: dict) -> list[str]:
+    """
+    Periksa kewajaran URL entri repository TANPA akses jaringan.
+
+    Mengembalikan daftar masalah (kosong = tidak ada kejanggalan).
+
+    Sengaja hanya menandai kontradiksi yang jelas, mis. platform tertulis
+    'dspace' tapi oai_endpoint berpola EPrints ('/cgi/oai2'). Variasi URL
+    pencarian TIDAK dinilai karena sah berbeda antar instalasi — itu akan
+    menghasilkan alarm palsu.
+    """
+    masalah = []
+    platform = (univ.get("platform") or "").lower()
+    oai = univ.get("oai_endpoint") or ""
+    cari = univ.get("search_url") or ""
+
+    if not cari:
+        masalah.append("search_url kosong")
+    if not univ.get("url_base"):
+        masalah.append("url_base kosong")
+    if not univ.get("oai_endpoint") and not cari:
+        masalah.append("tidak punya oai_endpoint maupun search_url")
+
+    # Kontradiksi platform pada endpoint OAI
+    if oai and platform in SIDIK_JARI_OAI:
+        terdeteksi = _platform_dari_url(oai)
+        if terdeteksi and terdeteksi != platform:
+            masalah.append(
+                f"platform tertulis '{platform}' tapi oai_endpoint berpola "
+                f"{terdeteksi} — salah satu salah"
+            )
+
+    # Kontradiksi INTERNAL: OAI dan halaman pencarian menunjuk platform
+    # berbeda. Ini tidak bisa dibedakan dari entri yang memang memakai
+    # dua sistem sekaligus, jadi ditandai 'perlu dicek', bukan 'salah'.
+    plat_oai = _platform_dari_url(oai)
+    plat_cari = _platform_dari_url(cari)
+    if plat_oai and plat_cari and plat_oai != plat_cari:
+        masalah.append(
+            f"oai_endpoint berpola {plat_oai} tapi search_url berpola "
+            f"{plat_cari} — perlu dicek, salah satunya mungkin sudah usang"
+        )
+
+    # Domain OAI berbeda dengan domain utama
+    if oai and univ.get("url_base") and "//" in oai and "//" in univ["url_base"]:
+        host_oai = oai.split("/")[2].lower()
+        host_base = univ["url_base"].split("/")[2].lower()
+        if host_oai != host_base:
+            masalah.append(
+                f"domain OAI ({host_oai}) beda dengan url_base ({host_base})"
+            )
+
+    return masalah
 
 # ── Bobot deteksi full text ──────────────────────────────────────────
 SKOR_INDIKATOR = {
@@ -575,6 +650,28 @@ def oai_request(session: requests.Session, base_url: str, verb: str,
         return None
 
 
+def _cek_oai_hidup(session: requests.Session,
+                   oai_url: str) -> tuple[bool, str]:
+    """
+    Uji cepat apakah endpoint OAI benar-benar merespons protokol OAI-PMH.
+
+    Mengembalikan (hidup: bool, pesan: str). Dipakai hanya untuk
+    memperjelas diagnostik (v1.3.1) — bukan bagian alur pencarian.
+    """
+    try:
+        root = oai_request(session, oai_url, "Identify")
+    except Exception as e:
+        return False, f"request gagal ({e})"
+    if root is None:
+        return False, "tidak merespons / bukan XML"
+    if root.tag != "{http://www.openarchives.org/OAI/2.0/}OAI-PMH":
+        return False, "merespons tapi bukan protokol OAI-PMH"
+    if root.find(".//oai:error", OAI_NS) is not None:
+        err = root.find(".//oai:error", OAI_NS)
+        return False, f"OAI mengembalikan error: {err.text}"
+    return True, "ok"
+
+
 def oai_search(session: requests.Session, oai_url: str,
                keyword: str, max_records: int = 30) -> list[Skripsi]:
     """
@@ -844,6 +941,8 @@ class PencariSkripsi:
         self.pakai_cache = pakai_cache
         self.max_workers = max_workers
         self._config = muat_konfigurasi()
+        # Diagnostik per universitas: {id: alasan gagal}
+        self.diagnosa: dict[str, str] = {}
 
     def log(self, pesan: str, warna=Fore.WHITE, end="\n"):
         if self.verbose:
@@ -868,13 +967,24 @@ class PencariSkripsi:
           - auto: coba OAI-PMH dulu, fallback ke HTML
           - oai:  paksa OAI-PMH
           - html: paksa HTML scraping
+
+        Alasan kegagalan dicatat di self.diagnosa[univ_id] supaya
+        ditampilkan di akhir (v1.3.1) — sebelumnya error ditelan diam-diam
+        sehingga user hanya melihat "0 hasil" tanpa tahu sebabnya.
         """
         hasil = []
+        catatan = []
+        uid = univ.get("id", "?")
 
         # ── OAI-PMH path ─────────────────────────────────────────────
         if metode in ("auto", "oai") and univ.get("oai_endpoint"):
             time.sleep(self.delay * 0.5)
             try:
+                # v1.3.1: bedakan "endpoint mati" dari "kata kunci tak ada"
+                # dengan memeriksa apakah respons OAI valid & berisi rekaman.
+                oai_hidup, oai_pesan = _cek_oai_hidup(
+                    self.session, univ["oai_endpoint"]
+                )
                 rekaman = oai_search(
                     self.session, univ["oai_endpoint"],
                     keyword, max_records=max_hasil
@@ -883,8 +993,20 @@ class PencariSkripsi:
                     r.universitas = univ["nama"]
                     r.kode_univ = univ["id"]
                 hasil.extend(rekaman)
+
+                if not rekaman:
+                    if not oai_hidup:
+                        catatan.append(f"OAI tidak bisa dipakai: {oai_pesan}")
+                    else:
+                        catatan.append(
+                            "OAI aktif, tapi kata kunci tidak ada di "
+                            "rekaman terbaru yang diambil"
+                        )
             except Exception as e:
+                catatan.append(f"OAI gagal: {e}")
                 self.log(f"    OAI gagal ({e}), fallback ke HTML...", Fore.YELLOW)
+        elif metode in ("auto", "oai") and not univ.get("oai_endpoint"):
+            catatan.append("tidak punya oai_endpoint")
 
         # ── HTML path (fallback atau paksa) ───────────────────────────
         if not hasil and metode != "oai":
@@ -901,6 +1023,8 @@ class PencariSkripsi:
                     html = resp.text
 
             if not html:
+                catatan.append("halaman pencarian HTML tidak bisa diakses")
+                self.diagnosa[uid] = " | ".join(catatan)
                 return []
 
             soup = BeautifulSoup(html, "lxml")
@@ -1000,6 +1124,21 @@ class PencariSkripsi:
                 )
                 hasil.append(skripsi)
 
+            # Diagnostik kalau HTML terjangkau tapi tidak ada item terparse
+            if not items_kasar:
+                catatan.append(
+                    "halaman pencarian terbuka, tapi 0 hasil ter-parse "
+                    f"(parser '{univ.get('parser')}' tidak cocok dengan layout)"
+                )
+            elif not hasil:
+                catatan.append(
+                    f"{len(items_kasar)} item ter-parse, tapi tidak satu pun "
+                    "bisa diverifikasi"
+                )
+
+        if not hasil and catatan:
+            self.diagnosa[uid] = " | ".join(catatan)
+
         return hasil
 
     def cari_banyak(self, keyword: str,
@@ -1028,7 +1167,9 @@ class PencariSkripsi:
                     univ, keyword, max_per_univ, metode
                 )
                 return r
-            except Exception:
+            except Exception as e:                      # v1.3.1
+                # Jangan telan diam-diam — catat supaya bisa ditampilkan
+                self.diagnosa[univ.get("id", "?")] = f"error tak terduga: {e}"
                 return []
 
         # Concurrent fetch dengan ThreadPoolExecutor
@@ -1153,6 +1294,53 @@ def cetak_ringkasan(hasil: list[Skripsi]):
                 print(f"       🔒 {alasan_detail}")
             else:
                 print(f"       🔒 {CATATAN_AKSES['locked']}")
+
+
+def cetak_diagnostik(diagnosa: dict, unis: list[dict], verbose: bool = True):
+    """
+    Tampilkan universitas yang tidak menghasilkan apa-apa BESERTA alasannya.
+
+    Ini perbaikan v1.3.1: sebelumnya kegagalan ditelan diam-diam sehingga
+    user hanya melihat "0 hasil" tanpa tahu apakah kampusnya mati, config-nya
+    salah, atau kata kuncinya memang tidak ada.
+    """
+    if not diagnosa:
+        return
+
+    nama_map = {u["id"]: u["nama"] for u in unis}
+
+    print(f"\n  {Fore.YELLOW}● Diagnostik — kampus tanpa hasil ({len(diagnosa)})"
+          f"{Style.RESET_ALL}")
+    print(f"  {'─'*58}")
+    for uid, alasan in sorted(diagnosa.items()):
+        print(f"  {uid:<10} {nama_map.get(uid, '')[:28]:<28}")
+        print(f"  {'':<10} {Fore.YELLOW}↳ {alasan}{Style.RESET_ALL}")
+
+    # Petakan alasan yang paling sering → saran tindakan
+    gabung = " ".join(diagnosa.values()).lower()
+    saran = []
+    if "oai gagal" in gabung:
+        saran.append("sebagian endpoint OAI mati/berubah → coba --metode html")
+    if "tidak punya oai_endpoint" in gabung:
+        saran.append("kampus tanpa OAI → gunakan --metode html")
+    if "0 hasil ter-parse" in gabung:
+        saran.append("parser tidak cocok dengan layout situs → situs kampus "
+                     "mungkin sudah berubah (lapor sebagai issue)")
+    if "oai aktif, tapi kata kunci tidak ada" in gabung:
+        saran.append("OAI hanya mengambil rekaman TERBARU, bukan seluruh "
+                     "katalog → coba kata kunci yang lebih umum")
+    if "oai tidak bisa dipakai" in gabung:
+        saran.append("endpoint OAI mati/berubah → coba --metode html untuk "
+                     "kampus tersebut")
+    if "tidak bisa diakses" in gabung:
+        saran.append("situs kampus tidak dapat dijangkau → cek koneksi, "
+                     "atau skip kampus tersebut")
+
+    if saran:
+        print(f"\n  {Fore.CYAN}Saran:{Style.RESET_ALL}")
+        for s in saran:
+            print(f"    • {s}")
+    print()
 
 
 def ekspor_csv(hasil: list[Skripsi], path: str):
@@ -1377,6 +1565,9 @@ Contoh:
                         help="Jeda antar request detik (default: 1.2)")
     parser.add_argument("--no-cache", action="store_true",
                         help="Nonaktifkan cache lokal")
+    parser.add_argument("--cek-konfigurasi", action="store_true",
+                        help="Periksa kewajaran URL di repositories.json "
+                             "(tanpa akses internet)")
     parser.add_argument("--list-universitas", action="store_true",
                         help="Tampilkan daftar universitas")
     parser.add_argument("--interactive", "-i", action="store_true",
@@ -1391,6 +1582,38 @@ Contoh:
         print(f"\n{Fore.CYAN}{'─'*62}")
         print(f"  PENCARI SKRIPSI FULL TEXT  v{VERSION}  |  PT Indonesia")
         print(f"{'─'*62}{Style.RESET_ALL}")
+
+    # ── Cek konfigurasi (offline) ────────────────────────────────────
+    if args.cek_konfigurasi:
+        config = muat_konfigurasi()
+        unis = config["universitas"]
+        if args.tipe:
+            unis = [u for u in unis if u["tipe"] == args.tipe]
+
+        bermasalah = []
+        for u in unis:
+            masalah = periksa_konfigurasi(u)
+            if masalah:
+                bermasalah.append((u, masalah))
+
+        print(f"\n  Memeriksa {len(unis)} entri di repositories.json ...\n")
+        if not bermasalah:
+            print(f"  {Fore.GREEN}[✓]{Style.RESET_ALL} "
+                  "Tidak ada kejanggalan URL yang terdeteksi.\n")
+            return
+
+        print(f"  {Fore.YELLOW}[!]{Style.RESET_ALL} "
+              f"{len(bermasalah)} entri mencurigakan:\n")
+        for u, masalah in bermasalah:
+            print(f"  {Fore.YELLOW}{u['id']:<14}{Style.RESET_ALL} "
+                  f"{u['nama'][:38]}  ({u.get('platform')})")
+            for m in masalah:
+                print(f"                 ↳ {m}")
+        print(f"\n  {Fore.CYAN}Catatan:{Style.RESET_ALL} pemeriksaan ini hanya "
+              "menilai konsistensi URL,\nbukan membuktikan endpoint-nya hidup. "
+              "Entri di atas kemungkinan besar gagal\nsaat dipakai — perbaiki "
+              "repositories.json atau lewati kampus tersebut.\n")
+        return
 
     # ── List universitas ─────────────────────────────────────────────
     if args.list_universitas:
@@ -1420,6 +1643,16 @@ Contoh:
     if not args.keyword:
         parser.error("--keyword/-k diperlukan. Gunakan --interactive untuk mode interaktif.")
 
+    # ── Peringatan mode oai (v1.3.1) ─────────────────────────────────
+    # Mode 'oai' mematikan fallback HTML, jadi kalau OAI mati tidak ada
+    # jalan lain. Beri tahu user di depan, bukan setelah 0 hasil.
+    if args.metode == "oai" and not args.quiet:
+        print(f"\n  {Fore.YELLOW}[!] Mode 'oai' menonaktifkan fallback HTML. "
+              f"Kampus tanpa OAI\n      yang berfungsi akan menghasilkan 0 "
+              f"tanpa percobaan kedua.{Style.RESET_ALL}")
+        print(f"  {Fore.WHITE}    Gunakan --metode auto untuk hasil terbaik."
+              f"{Style.RESET_ALL}")
+
     # ── Jalankan pencarian ───────────────────────────────────────────
     pencari = PencariSkripsi(
         delay=args.delay,
@@ -1440,6 +1673,12 @@ Contoh:
 
     if not args.quiet:
         cetak_ringkasan(hasil)
+        # v1.3.1: tampilkan sebab kegagalan, jangan biarkan "0 hasil" tanpa alasan
+        unis_dipakai = pencari.daftar_universitas(args.tipe, args.provinsi)
+        if args.universitas:
+            unis_dipakai = [u for u in unis_dipakai
+                            if u["id"] in args.universitas]
+        cetak_diagnostik(pencari.diagnosa, unis_dipakai)
 
     # ── Ekspor ───────────────────────────────────────────────────────
     if hasil:
